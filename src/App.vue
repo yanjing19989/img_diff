@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import CompareViewport from './components/CompareViewport.vue'
 import FileDetails from './components/FileDetails.vue'
 import ImagePicker from './components/ImagePicker.vue'
@@ -23,6 +23,17 @@ const modes: Array<{ id: CompareMode; label: string; icon: string }> = [
   { id: 'subtract', label: '相减', icon: '−' },
   { id: 'details', label: '文件详解', icon: '≡' },
 ]
+
+interface ServerImage {
+  name: string
+  url: string
+}
+
+interface ServerConfig {
+  left: ServerImage
+  right: ServerImage
+  mode: CompareMode
+}
 
 const mode = ref<CompareMode>('split')
 const left = shallowRef<ImageAsset | null>(null)
@@ -146,6 +157,45 @@ async function selectFile(side: 'left' | 'right', file: File) {
     if (token === (side === 'left' ? leftRequest : rightRequest)) loading.value = false
   }
 }
+
+function isCompareMode(value: unknown): value is CompareMode {
+  return typeof value === 'string' && modes.some((item) => item.id === value)
+}
+
+function isServerImage(value: unknown): value is ServerImage {
+  if (!value || typeof value !== 'object') return false
+  const image = value as Partial<ServerImage>
+  return typeof image.name === 'string' && typeof image.url === 'string'
+}
+
+async function fetchServerFile(image: ServerImage) {
+  const response = await fetch(image.url, { cache: 'no-store' })
+  if (!response.ok) throw new Error(`无法读取 ${image.name}（HTTP ${response.status}）`)
+  const blob = await response.blob()
+  return new File([blob], image.name, { type: blob.type, lastModified: Date.now() })
+}
+
+onMounted(async () => {
+  if (new URLSearchParams(window.location.search).get('autoload') !== '1') return
+
+  try {
+    const response = await fetch('/__image_diff__/config', { cache: 'no-store' })
+    if (!response.ok) throw new Error(`无法读取服务配置（HTTP ${response.status}）`)
+    const config = (await response.json()) as Partial<ServerConfig>
+    if (!isServerImage(config.left) || !isServerImage(config.right) || !isCompareMode(config.mode)) {
+      throw new Error('服务配置无效')
+    }
+
+    mode.value = config.mode
+    const [leftFile, rightFile] = await Promise.all([
+      fetchServerFile(config.left),
+      fetchServerFile(config.right),
+    ])
+    await Promise.all([selectFile('left', leftFile), selectFile('right', rightFile)])
+  } catch (reason) {
+    workspaceError.value = reason instanceof Error ? reason.message : '无法从本地服务加载图片'
+  }
+})
 
 function clearSide(side: 'left' | 'right') {
   if (side === 'left') {
@@ -320,6 +370,7 @@ onBeforeUnmount(() => {
       <span aria-hidden="true">◫</span>
       <h2>选择两张图片开始对比</h2>
       <p>支持常用图片格式，所有计算都在本地完成。</p>
+      <p v-if="workspaceError" class="workspace-error" role="alert">{{ workspaceError }}</p>
     </section>
   </main>
 </template>
